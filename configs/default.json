@@ -1,0 +1,86 @@
+{
+  "evolution": {
+    "population_size": 8,
+    "max_generations": 20,
+    "elite_count": 2,
+    "tournament_size": 3,
+    "diversity_threshold": 0.15,
+    "convergence_threshold": 0.01,
+    "checkpoint_interval": 5
+  },
+  "fitness": {
+    "accuracy_weight": 0.7,
+    "cost_weight": 0.3,
+    "diversity_bonus": 0.05,
+    "dynamic_weights": true,
+    "weight_shift_rate": 0.02
+  },
+  "mutation": {
+    "base_rate": 0.3,
+    "min_rate": 0.05,
+    "max_rate": 0.8,
+    "adaptive": true,
+    "decay_factor": 0.95,
+    "types": {
+      "layer_addition": 0.15,
+      "layer_removal": 0.10,
+      "layer_modification": 0.20,
+      "optimizer_change": 0.10,
+      "lr_perturbation": 0.20,
+      "dropout_change": 0.10,
+      "architecture_resize": 0.10,
+      "training_strategy": 0.05
+    }
+  },
+  "crossover": {
+    "rate": 0.7,
+    "blend_ratio": 0.5,
+    "strategy": "single_point"
+  },
+  "builder_species": [
+    {
+      "name": "transformer_specialist",
+      "personality": "Favors deep attention-based architectures with multi-head self-attention layers. Prefers complex pattern recognition.",
+      "focus": "attention_depth",
+      "creativity": 0.6
+    },
+    {
+      "name": "efficient_architect",
+      "personality": "Minimizes parameter count while maintaining accuracy. Uses depthwise separable convolutions and pruning.",
+      "focus": "efficiency",
+      "creativity": 0.4
+    },
+    {
+      "name": "hybrid_innovator",
+      "personality": "Experiments with unconventional layer combinations. Mixes CNN, attention, and dense pathways.",
+      "focus": "novelty",
+      "creativity": 0.9
+    },
+    {
+      "name": "accuracy_maximizer",
+      "personality": "Builds wide and deep networks. Uses ensemble-style branching and heavy regularization.",
+      "focus": "accuracy",
+      "creativity": 0.5
+    },
+    {
+      "name": "cost_minimizer",
+      "personality": "Builds the smallest possible models. Favors shallow architectures with aggressive pooling.",
+      "focus": "cost",
+      "creativity": 0.3
+    }
+  ],
+  "heuristic": {
+    "base_accuracy_range": [0.45, 0.98],
+    "base_cost_range": [0.01, 1.0],
+    "attention_bonus": 0.08,
+    "depth_bonus_per_layer": 0.015,
+    "width_bonus_per_unit": 0.0001,
+    "dropout_penalty": 0.02,
+    "complexity_penalty": 0.005,
+    "noise_std": 0.02
+  },
+  "database": {
+    "url": "sqlite:///evolvelab.db",
+    "echo": false
+  }
+}
