@@ -3,6 +3,7 @@ EvolveLab — FastAPI Backend
 REST API and WebSocket endpoints for the evolution system.
 """
 
+import json
 import threading
 import logging
 from typing import Optional
@@ -238,10 +239,25 @@ def get_checkpoints():
 
 @app.post("/api/checkpoints/{cp_id}/restore")
 def restore_checkpoint(cp_id: int):
+    global engine
+
     cp = db.get_checkpoint(cp_id)
     if not cp:
         return {"error": "Checkpoint not found"}
-    return {"status": "restored", "generation": cp.get("generation_number")}
+
+    if engine and engine.running:
+        return {"error": "Cannot restore while evolution is running"}
+
+    # Create a fresh engine and restore state from checkpoint
+    cfg = load_config()
+    engine = EvolutionEngine(cfg, db)
+    engine.restore_from_checkpoint(cp)
+
+    return {
+        "status": "restored",
+        "generation": cp.get("generation_number"),
+        "best_fitness": cp.get("engine_state", {}).get("best_fitness", 0),
+    }
 
 
 # ── Events ─────────────────────────────────────────────────────
@@ -264,6 +280,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 await websocket.send_text('{"type": "pong"}')
             elif data == "status":
                 status = get_status()
-                await websocket.send_text(str(status))
+                await websocket.send_text(json.dumps(status))
     except WebSocketDisconnect:
         ws_manager.disconnect(websocket)

@@ -56,7 +56,13 @@ class CrossoverAgent:
 
     def crossover_pairs(self, parents: List[Genome], num_children: int,
                         generation: int = 0) -> List[Genome]:
-        """Generate children from random parent pairs."""
+        """Generate children from random parent pairs.
+
+        Always produces exactly num_children offspring. When the crossover
+        probability roll fails, the fitter parent is cloned instead of
+        producing nothing — this prevents the engine from filling gaps with
+        random builder genomes that dilute evolutionary pressure.
+        """
         children = []
         for _ in range(num_children):
             if len(parents) < 2:
@@ -65,6 +71,14 @@ class CrossoverAgent:
             if random.random() < self.rate:
                 child = self.crossover(p1, p2, generation)
                 children.append(child)
+            else:
+                # Clone fitter parent instead of producing nothing
+                fitter = p1 if (p1.metrics.get("fitness_score") or 0) >= (p2.metrics.get("fitness_score") or 0) else p2
+                clone = fitter.clone(new_id=True)
+                clone.generation = generation
+                clone.lineage["parent_a"] = fitter.id
+                clone.lineage["creation_method"] = "clone"
+                children.append(clone)
 
         logger.info("Produced %d children from %d parents", len(children), len(parents))
         return children
@@ -93,6 +107,9 @@ class CrossoverAgent:
         fit_a = pa.metrics.get("fitness_score") or 0
         fit_b = pb.metrics.get("fitness_score") or 0
         arch_type = pa.architecture.get("type") if fit_a >= fit_b else pb.architecture.get("type")
+
+        # Fix dimension mismatches at the splice boundary
+        child_layers = self._validate_and_fix_dimensions(child_layers)
 
         return {
             "type": arch_type or "cnn",
@@ -145,3 +162,64 @@ class CrossoverAgent:
         if fit_a >= fit_b:
             return pa.species
         return pb.species
+
+    # ── Dimension Validation ─────────────────────────────────────────
+
+    @staticmethod
+    def _get_layer_output_dim(layer: dict) -> int:
+        """Infer the output dimensionality of a layer (0 = passthrough/unknown)."""
+        lt = layer.get("type", "")
+        if lt == "conv2d":
+            return layer.get("filters", 32)
+        if lt == "depthwise_conv":
+            return 0  # preserves input channels
+        if lt == "dense":
+            return layer.get("units", 128)
+        if lt == "attention":
+            return layer.get("dim", 64)
+        # pooling, dropout, norm, flatten, residual — passthrough
+        return 0
+
+    @staticmethod
+    def _get_layer_input_expectation(layer: dict) -> int:
+        """Infer what input dim a layer expects (0 = any/flexible)."""
+        lt = layer.get("type", "")
+        if lt == "dense":
+            return 0  # dense layers accept any flattened input
+        if lt == "attention":
+            return layer.get("dim", 64)  # expects matching embed dim
+        if lt == "conv2d":
+            return 0  # conv accepts any channel count
+        return 0
+
+    def _validate_and_fix_dimensions(self, layers: list) -> list:
+        """Scan layer list for dimension mismatches and insert adapters.
+
+        Detects transitions like conv2d(128 out) → attention(dim=64) where
+        the output of one layer doesn't match the expected input of the next.
+        Inserts a minimal adapter (dense projection) to bridge the gap.
+        """
+        if len(layers) < 2:
+            return layers
+
+        fixed = [layers[0]]
+        for i in range(1, len(layers)):
+            prev = fixed[-1]
+            curr = layers[i]
+
+            prev_out = self._get_layer_output_dim(prev)
+            curr_in = self._get_layer_input_expectation(curr)
+
+            # Only insert adapter when both dims are known AND they mismatch
+            if prev_out > 0 and curr_in > 0 and prev_out != curr_in:
+                adapter = {"type": "dense", "units": curr_in, "activation": "relu"}
+                fixed.append(adapter)
+                logger.debug(
+                    "Inserted adapter dense(%d) between %s(%d) and %s(%d)",
+                    curr_in, prev.get("type"), prev_out,
+                    curr.get("type"), curr_in,
+                )
+
+            fixed.append(curr)
+
+        return fixed

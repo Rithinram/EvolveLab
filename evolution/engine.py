@@ -155,9 +155,10 @@ class EvolutionEngine:
         if gen == 0:
             # Initial population from builder agents
             genomes = self._generate_initial_population(gen)
+            mutation_map = {}  # No mutations in gen 0
         else:
             # Evolve from previous generation
-            genomes = self._evolve_population(gen)
+            genomes, mutation_map = self._evolve_population(gen)
 
         population.add_many(genomes)
 
@@ -171,14 +172,21 @@ class EvolutionEngine:
         # 3. Rank
         population.assign_ranks()
 
-        # 4. Update best
+        # 4. Close the mutation feedback loop
+        # Now that genomes are evaluated, backfill fitness_after on every
+        # mutation record and feed the results into the memory store so
+        # adaptive mutation rates/weights are based on real data.
+        if mutation_map:
+            self._close_mutation_feedback(population, mutation_map, gen)
+
+        # 5. Update best
         best = population.best()
         if best and (best.metrics.get("fitness_score") or 0) > self.best_fitness:
             self.best_fitness = best.metrics.get("fitness_score", 0)
             self.best_accuracy = best.metrics.get("accuracy", 0)
             self.best_genome = best
 
-        # 5. Compute stats
+        # 6. Compute stats
         elapsed = time.time() - start_time
         gen_stats = {
             "generation": gen,
@@ -193,7 +201,10 @@ class EvolutionEngine:
             "elapsed": elapsed,
         }
 
-        # 6. Save generation to DB
+        # 7. Dynamic fitness weight shifting
+        self._maybe_shift_fitness_weights(gen_stats)
+
+        # 8. Save generation to DB
         gen_db = {
             "number": gen,
             "population_size": population.size,
@@ -208,11 +219,11 @@ class EvolutionEngine:
         }
         gen_id = self.db.save_generation(gen_db)
 
-        # 7. Save genomes
+        # 9. Save genomes
         genome_dicts = population.to_dicts(gen_id)
         self.db.save_genomes_batch(genome_dicts)
 
-        # 8. Record to memory
+        # 10. Record to memory
         self.memory.record_generation_stats(gen_stats)
         if best:
             self.memory.record_best_pattern(best.to_dict())
@@ -224,7 +235,7 @@ class EvolutionEngine:
                 g.survived,
             )
 
-        # 9. Evolve prompts
+        # 11. Evolve prompts
         agent_fitness = self._compute_agent_fitness(population)
         prompt_records = self.meta_prompt.evolve_prompts(
             self.builders, gen, agent_fitness, self.memory
@@ -232,7 +243,7 @@ class EvolutionEngine:
         for pr in prompt_records:
             self.db.save_prompt(pr)
 
-        # 10. Update agent states
+        # 12. Update agent states
         for agent in self.builders:
             agent_genomes = [g for g in population.genomes if g.species == agent.species]
             fitnesses = [g.metrics.get("fitness_score", 0) for g in agent_genomes]
@@ -246,9 +257,9 @@ class EvolutionEngine:
         })
 
         logger.info(
-            "Gen %d complete: best=%.4f avg=%.4f diversity=%.2f (%.1fs)",
+            "Gen %d complete: best=%.4f avg=%.4f diversity=%.2f mut_rate=%.3f (%.1fs)",
             gen, gen_stats["best_fitness"], gen_stats["avg_fitness"],
-            gen_stats["diversity"], elapsed,
+            gen_stats["diversity"], self.mutator.current_rate, elapsed,
         )
 
         return gen_stats
@@ -273,18 +284,27 @@ class EvolutionEngine:
 
         return genomes[:self.population_size]
 
-    def _evolve_population(self, generation: int) -> List[Genome]:
-        """Evolve new population from previous generation's survivors."""
+    def _evolve_population(self, generation: int):
+        """Evolve new population from previous generation's survivors.
+
+        Returns:
+            Tuple of (genomes list, mutation_map) where mutation_map maps
+            genome_id -> list of mutation record dicts with fitness_before.
+        """
         # Get previous generation genomes from DB
         prev_genomes_data = self.db.get_genomes_by_generation(generation - 1)
         if not prev_genomes_data:
             logger.warning("No previous genomes found, generating fresh population")
-            return self._generate_initial_population(generation)
+            return self._generate_initial_population(generation), {}
 
         prev_genomes = [Genome.from_dict(d) for d in prev_genomes_data]
 
         # Select parents
         parents = self.selector.select(prev_genomes, max(4, self.population_size // 2))
+
+        # Fix #4: Mark survivors from previous generation in DB
+        survivor_ids = {p.id for p in parents}
+        self.db.update_survived_flags(generation - 1, survivor_ids)
 
         self._emit("selection_complete", {
             "description": f"Selected {len(parents)} parents",
@@ -314,21 +334,23 @@ class EvolutionEngine:
             "children_count": len(children),
         })
 
-        # Mutation
-        mutation_records = []
+        # Mutation — track which genomes were mutated and their pre-mutation fitness
+        mutation_map = {}  # genome_id -> [mutation records with fitness_before]
         for i, genome in enumerate(new_genomes):
             if not genome.is_elite and random.random() < self.mutator.current_rate:
                 mutated, records = self.mutator.mutate(genome, self.memory, generation)
                 new_genomes[i] = mutated
-                mutation_records.extend(records)
+                if records:
+                    mutation_map[mutated.id] = records
 
-        # Save mutation records
-        for mr in mutation_records:
-            self.db.save_mutation(mr)
+        # Save mutation records to DB (fitness_after still NULL at this point)
+        for records in mutation_map.values():
+            for mr in records:
+                self.db.save_mutation(mr)
 
         self._emit("mutation_complete", {
-            "description": f"Applied {len(mutation_records)} mutations",
-            "mutation_count": len(mutation_records),
+            "description": f"Applied {sum(len(r) for r in mutation_map.values())} mutations",
+            "mutation_count": sum(len(r) for r in mutation_map.values()),
             "mutation_rate": self.mutator.current_rate,
         })
 
@@ -338,7 +360,7 @@ class EvolutionEngine:
             new = agent.generate(generation, 1, self.memory)
             new_genomes.extend(new)
 
-        return new_genomes[:self.population_size]
+        return new_genomes[:self.population_size], mutation_map
 
     def _compute_agent_fitness(self, population: Population) -> Dict[str, float]:
         """Compute average fitness per agent species."""
@@ -352,6 +374,79 @@ class EvolutionEngine:
             for species, fits in species_fitness.items()
             if fits
         }
+
+    def _close_mutation_feedback(self, population: Population,
+                                 mutation_map: dict, generation: int):
+        """Backfill fitness_after on mutation records and feed into memory.
+
+        This is the critical step that makes adaptive mutation rates work:
+        without it, the memory store has no data and adaptive weights/rates
+        fall through to static defaults.
+        """
+        genome_fitness = {g.id: g.metrics.get("fitness_score", 0)
+                          for g in population.genomes}
+
+        # When fitness_before is None (mutations on unevaluated children),
+        # use the previous generation's avg fitness as a meaningful baseline.
+        prev_avg = 0.0
+        if self.history:
+            prev_avg = self.history[-1].get("avg_fitness", 0)
+
+        for genome_id, records in mutation_map.items():
+            fitness_after = genome_fitness.get(genome_id, 0)
+            for rec in records:
+                fitness_before = rec.get("fitness_before")
+                if fitness_before is None:
+                    fitness_before = prev_avg
+                delta = round(fitness_after - fitness_before, 6)
+                success = delta > 0
+
+                # Update DB record
+                self.db.update_mutation_result(
+                    genome_id=genome_id,
+                    generation_number=generation,
+                    mutation_type=rec["mutation_type"],
+                    fitness_after=fitness_after,
+                    fitness_delta=delta,
+                    success=success,
+                )
+
+                # Feed into memory store — this is what drives adaptive rates
+                self.memory.record_mutation(
+                    rec["mutation_type"], fitness_before, fitness_after
+                )
+
+        logger.debug(
+            "Mutation feedback closed: %d genomes, %d records",
+            len(mutation_map),
+            sum(len(r) for r in mutation_map.values()),
+        )
+
+    def _maybe_shift_fitness_weights(self, gen_stats: dict):
+        """Dynamically shift accuracy/cost weights based on convergence.
+
+        If the population is converging (low diversity), shift toward cost
+        optimization. If still exploring (high diversity), favor accuracy.
+        """
+        if not self.fitness_config.get("dynamic_weights", False):
+            return
+
+        shift_rate = self.fitness_config.get("weight_shift_rate", 0.02)
+        diversity = gen_stats.get("diversity", 0.5)
+        acc_w = self.fitness_config.get("accuracy_weight", 0.7)
+        cost_w = self.fitness_config.get("cost_weight", 0.3)
+
+        if diversity < 0.3:
+            # Converging — push toward cost efficiency to differentiate
+            acc_w = max(0.4, acc_w - shift_rate)
+            cost_w = min(0.6, cost_w + shift_rate)
+        elif diversity > 0.7:
+            # High diversity — push toward accuracy to converge
+            acc_w = min(0.9, acc_w + shift_rate)
+            cost_w = max(0.1, cost_w - shift_rate)
+
+        self.fitness_config["accuracy_weight"] = round(acc_w, 4)
+        self.fitness_config["cost_weight"] = round(cost_w, 4)
 
     def _save_checkpoint(self, generation: int):
         """Save an evolution checkpoint."""
@@ -369,6 +464,18 @@ class EvolutionEngine:
         }
         self.db.save_checkpoint(cp)
         logger.info("Checkpoint saved at generation %d", generation)
+
+    def restore_from_checkpoint(self, checkpoint: dict):
+        """Restore engine state from a saved checkpoint."""
+        state = checkpoint.get("engine_state", {})
+        self.best_fitness = state.get("best_fitness", 0.0)
+        self.best_accuracy = state.get("best_accuracy", 0.0)
+        self.current_generation = state.get("current_generation", 0)
+        self.mutator.current_rate = state.get("mutation_rate", self.mutator.base_rate)
+        logger.info(
+            "Restored from checkpoint: gen=%d, best_fitness=%.4f",
+            self.current_generation, self.best_fitness,
+        )
 
     def pause(self):
         self.paused = True

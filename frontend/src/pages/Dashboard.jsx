@@ -5,7 +5,7 @@
 
 import { usePolling, getStatus, getGenerations, getBestGenome, getEvents } from '../api/client';
 import {
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area
+  XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area
 } from 'recharts';
 
 export default function Dashboard() {

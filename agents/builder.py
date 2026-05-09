@@ -15,6 +15,95 @@ from evolution.genome import (
 
 logger = logging.getLogger("evolvelab.builder")
 
+# ── Curated Seed Architectures ──────────────────────────────────────
+# Proven mini-architectures that give evolution a reliable starting point
+# instead of fully random layer combos that may be structurally nonsensical.
+
+SEED_ARCHITECTURES = {
+    "transformer_specialist": [
+        {   # Mini-ViT style
+            "type": "transformer",
+            "layers": [
+                {"type": "conv2d", "filters": 64, "kernel": 3, "activation": "gelu"},
+                {"type": "layer_norm"},
+                {"type": "attention", "heads": 4, "dim": 64},
+                {"type": "dropout", "rate": 0.1},
+                {"type": "attention", "heads": 4, "dim": 64},
+                {"type": "layer_norm"},
+                {"type": "dense", "units": 128, "activation": "gelu"},
+            ],
+            "input_shape": [1, 28, 28], "output_classes": 10,
+        },
+    ],
+    "efficient_architect": [
+        {   # MobileNet-style depthwise separable
+            "type": "efficient_net_style",
+            "layers": [
+                {"type": "conv2d", "filters": 32, "kernel": 3, "activation": "relu"},
+                {"type": "batch_norm"},
+                {"type": "depthwise_conv", "kernel": 3, "activation": "relu"},
+                {"type": "batch_norm"},
+                {"type": "pooling", "type_": "avg", "size": 2},
+                {"type": "dense", "units": 64, "activation": "relu"},
+            ],
+            "input_shape": [1, 28, 28], "output_classes": 10,
+        },
+    ],
+    "hybrid_innovator": [
+        {   # CNN + Attention hybrid
+            "type": "hybrid_transformer_cnn",
+            "layers": [
+                {"type": "conv2d", "filters": 64, "kernel": 3, "activation": "relu"},
+                {"type": "batch_norm"},
+                {"type": "conv2d", "filters": 128, "kernel": 3, "activation": "relu"},
+                {"type": "attention", "heads": 4, "dim": 128},
+                {"type": "dropout", "rate": 0.2},
+                {"type": "dense", "units": 256, "activation": "gelu"},
+                {"type": "dense", "units": 128, "activation": "relu"},
+            ],
+            "input_shape": [1, 28, 28], "output_classes": 10,
+        },
+    ],
+    "accuracy_maximizer": [
+        {   # Mini-ResNet style (deep CNN)
+            "type": "residual_cnn",
+            "layers": [
+                {"type": "conv2d", "filters": 64, "kernel": 3, "activation": "relu"},
+                {"type": "batch_norm"},
+                {"type": "conv2d", "filters": 64, "kernel": 3, "activation": "relu"},
+                {"type": "batch_norm"},
+                {"type": "conv2d", "filters": 128, "kernel": 3, "activation": "relu"},
+                {"type": "batch_norm"},
+                {"type": "dropout", "rate": 0.3},
+                {"type": "dense", "units": 512, "activation": "relu"},
+                {"type": "dropout", "rate": 0.3},
+                {"type": "dense", "units": 256, "activation": "relu"},
+            ],
+            "input_shape": [1, 28, 28], "output_classes": 10,
+        },
+    ],
+    "cost_minimizer": [
+        {   # Minimal MLP baseline
+            "type": "mlp",
+            "layers": [
+                {"type": "dense", "units": 128, "activation": "relu"},
+                {"type": "dropout", "rate": 0.2},
+                {"type": "dense", "units": 64, "activation": "relu"},
+            ],
+            "input_shape": [1, 28, 28], "output_classes": 10,
+        },
+        {   # Tiny CNN
+            "type": "cnn",
+            "layers": [
+                {"type": "conv2d", "filters": 16, "kernel": 3, "activation": "relu"},
+                {"type": "pooling", "type_": "max", "size": 2},
+                {"type": "dense", "units": 64, "activation": "relu"},
+            ],
+            "input_shape": [1, 28, 28], "output_classes": 10,
+        },
+    ],
+}
+
 
 class BuilderAgent:
     """A species-specialized builder agent with memory and prompt evolution."""
@@ -85,12 +174,26 @@ class BuilderAgent:
         """Create a single genome guided by personality and memory."""
         genome = Genome(species=self.species, generation=generation)
 
-        # Generate architecture based on species preferences
-        arch = generate_random_architecture(
-            species=self.species,
-            min_layers=self._preferred_min_layers(),
-            max_layers=self._preferred_max_layers(),
+        # Gen 0: 40% chance to use a curated seed architecture for a
+        # reliable fitness floor; later generations always randomize so
+        # evolution has room to explore.
+        use_seed = (
+            generation == 0
+            and random.random() < 0.4
+            and self.species in SEED_ARCHITECTURES
         )
+
+        if use_seed:
+            import copy
+            arch = copy.deepcopy(random.choice(SEED_ARCHITECTURES[self.species]))
+            logger.debug("Agent %s using seed architecture (%s)", self.name, arch["type"])
+        else:
+            # Generate architecture based on species preferences
+            arch = generate_random_architecture(
+                species=self.species,
+                min_layers=self._preferred_min_layers(),
+                max_layers=self._preferred_max_layers(),
+            )
 
         # Apply memory-guided adjustments
         if memory_store and random.random() < 0.4:

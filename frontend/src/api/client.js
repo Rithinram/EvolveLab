@@ -123,7 +123,9 @@ export function usePolling(fetchFn, intervalMs = 3000, deps = []) {
     }
   };
 
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchData();
     intervalRef.current = setInterval(fetchData, intervalMs);
     return () => clearInterval(intervalRef.current);

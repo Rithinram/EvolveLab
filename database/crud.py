@@ -289,6 +289,45 @@ class DatabaseManager:
         finally:
             session.close()
 
+    def update_mutation_result(self, genome_id: str, generation_number: int,
+                                mutation_type: str, fitness_after: float,
+                                fitness_delta: float, success: bool):
+        """Backfill fitness_after on a mutation record after evaluation."""
+        session = self.get_session()
+        try:
+            records = session.query(MutationRecord).filter_by(
+                genome_id=genome_id,
+                generation_number=generation_number,
+                mutation_type=mutation_type,
+            ).all()
+            for rec in records:
+                rec.fitness_after = fitness_after
+                rec.fitness_delta = fitness_delta
+                rec.success = success
+            if records:
+                session.commit()
+        except Exception as e:
+            session.rollback()
+            logger.error("Failed to update mutation result: %s", e)
+        finally:
+            session.close()
+
+    def update_survived_flags(self, generation_number: int, survivor_ids: set):
+        """Mark which genomes from a generation survived selection."""
+        session = self.get_session()
+        try:
+            genomes = session.query(Genome).filter_by(
+                generation_number=generation_number
+            ).all()
+            for g in genomes:
+                g.survived = g.id in survivor_ids
+            session.commit()
+        except Exception as e:
+            session.rollback()
+            logger.error("Failed to update survived flags: %s", e)
+        finally:
+            session.close()
+
     def get_mutations(self, generation: int = None, limit: int = 200) -> List[dict]:
         session = self.get_session()
         try:

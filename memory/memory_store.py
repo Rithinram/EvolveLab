@@ -14,6 +14,10 @@ logger = logging.getLogger("evolvelab.memory")
 class MemoryStore:
     """Persistent evolutionary memory for the agent system."""
 
+    # Rolling window caps to prevent unbounded memory growth
+    MAX_HISTORY = 50
+    MAX_SURVIVAL_HISTORY = 100
+
     def __init__(self):
         # Mutation type success tracking
         self.mutation_successes: Dict[str, int] = defaultdict(int)
@@ -43,6 +47,9 @@ class MemoryStore:
         self.mutation_attempts[mutation_type] += 1
         delta = fitness_after - fitness_before
         self.mutation_deltas[mutation_type].append(delta)
+        # Cap rolling window
+        if len(self.mutation_deltas[mutation_type]) > self.MAX_HISTORY:
+            self.mutation_deltas[mutation_type] = self.mutation_deltas[mutation_type][-self.MAX_HISTORY:]
 
         if delta > 0:
             self.mutation_successes[mutation_type] += 1
@@ -97,6 +104,11 @@ class MemoryStore:
         """Track species-level performance."""
         self.species_fitness[species].append(fitness)
         self.species_survival[species].append(survived)
+        # Cap rolling windows
+        if len(self.species_fitness[species]) > self.MAX_HISTORY:
+            self.species_fitness[species] = self.species_fitness[species][-self.MAX_HISTORY:]
+        if len(self.species_survival[species]) > self.MAX_SURVIVAL_HISTORY:
+            self.species_survival[species] = self.species_survival[species][-self.MAX_SURVIVAL_HISTORY:]
 
     def get_species_stats(self) -> Dict[str, dict]:
         """Get aggregated species statistics."""
@@ -115,6 +127,9 @@ class MemoryStore:
     def record_prompt_fitness(self, agent_id: str, fitness: float, prompt_data: dict):
         """Track prompt performance for an agent."""
         self.prompt_fitness_history[agent_id].append(fitness)
+        # Cap rolling window
+        if len(self.prompt_fitness_history[agent_id]) > self.MAX_HISTORY:
+            self.prompt_fitness_history[agent_id] = self.prompt_fitness_history[agent_id][-self.MAX_HISTORY:]
         current_best = self.best_prompts.get(agent_id, {}).get("fitness", -999)
         if fitness > current_best:
             self.best_prompts[agent_id] = {**prompt_data, "fitness": fitness}
@@ -126,6 +141,9 @@ class MemoryStore:
     def record_generation_stats(self, stats: dict):
         """Store generation-level statistics."""
         self.generation_stats.append(stats)
+        # Cap rolling window
+        if len(self.generation_stats) > self.MAX_HISTORY:
+            self.generation_stats = self.generation_stats[-self.MAX_HISTORY:]
 
     def get_recommended_architecture(self) -> Optional[dict]:
         """Recommend architecture patterns based on best performers."""
