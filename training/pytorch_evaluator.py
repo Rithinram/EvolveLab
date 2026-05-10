@@ -5,6 +5,7 @@ Executes real training loops for genomes using generated code.
 
 import time
 import logging
+import gc
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -199,6 +200,8 @@ class PyTorchEvaluator:
         finally:
             if model is not None:
                 del model
+            
+            gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 

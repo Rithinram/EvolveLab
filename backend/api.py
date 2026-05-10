@@ -65,8 +65,9 @@ def health():
 
 @app.get("/api/status")
 def get_status():
-    if engine:
-        return engine.get_status()
+    with engine_lock:
+        if engine:
+            return engine.get_status()
     return {
         "running": False, "paused": False, "current_generation": 0,
         "max_generations": 0, "population_size": 0,
@@ -82,10 +83,6 @@ def get_status():
 def start_evolution(req: EvolutionStartRequest = None):
     global engine, evolution_thread
 
-    with engine_lock:
-        if engine and engine.running:
-            return {"error": "Evolution already running"}
-
     cfg = load_config()
     if req:
         if req.population_size:
@@ -97,17 +94,21 @@ def start_evolution(req: EvolutionStartRequest = None):
         if req.cost_weight is not None:
             cfg["fitness"]["cost_weight"] = req.cost_weight
 
-    engine = EvolutionEngine(cfg, db)
-    engine.set_event_callback(ws_manager.sync_broadcast)
+    with engine_lock:
+        if engine and engine.running:
+            return {"error": "Evolution already running"}
 
-    def run_evolution():
-        try:
-            engine.run()
-        except Exception as e:
-            logger.error("Evolution thread error: %s", e, exc_info=True)
+        engine = EvolutionEngine(cfg, db)
+        engine.set_event_callback(ws_manager.sync_broadcast)
 
-    evolution_thread = threading.Thread(target=run_evolution, daemon=True)
-    evolution_thread.start()
+        def run_evolution():
+            try:
+                engine.run()
+            except Exception as e:
+                logger.error("Evolution thread error: %s", e, exc_info=True)
+
+        evolution_thread = threading.Thread(target=run_evolution, daemon=True)
+        evolution_thread.start()
 
     return {"status": "started", "population_size": engine.population_size, "max_generations": engine.max_generations}
 
