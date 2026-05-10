@@ -82,5 +82,15 @@
   "database": {
     "url": "sqlite:///evolvelab.db",
     "echo": false
+  },
+  "evaluation": {
+    "mode": "heuristic",
+    "dataset": "mnist",
+    "batch_size": 32,
+    "val_split": 0.1,
+    "fidelity": 3,
+    "use_compile": false,
+    "dynamic_fidelity": true,
+    "max_oom_retries": 3
   }
 }

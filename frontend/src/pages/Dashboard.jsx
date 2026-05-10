@@ -3,7 +3,8 @@
  * KPI overview with fitness trends, best genome, and recent activity.
  */
 
-import { usePolling, getStatus, getGenerations, getBestGenome, getEvents } from '../api/client';
+import { usePolling, useWebSocket, getStatus, getGenerations, getBestGenome, getEvents } from '../api/client';
+import { useState, useCallback } from 'react';
 import {
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area
 } from 'recharts';
@@ -13,6 +14,27 @@ export default function Dashboard() {
   const { data: generations } = usePolling(getGenerations, 3000);
   const { data: bestGenome } = usePolling(getBestGenome, 5000);
   const { data: events } = usePolling(getEvents, 4000);
+
+  const [trainingData, setTrainingData] = useState([]);
+  const [currentEval, setCurrentEval] = useState(null);
+
+  const handleWebSocketMessage = useCallback((msg) => {
+    if (msg.type === 'training_batch') {
+      const { genome_id, loss, batch, epoch } = msg.data;
+      setCurrentEval(genome_id);
+      setTrainingData(prev => {
+        const newData = [...prev, { batch, loss, epoch }];
+        // Keep only last 50 points
+        return newData.slice(-50);
+      });
+    } else if (msg.type === 'generation_end') {
+      // Clear training data when generation ends
+      setTrainingData([]);
+      setCurrentEval(null);
+    }
+  }, []);
+
+  useWebSocket('/ws/evolution', handleWebSocketMessage);
 
   const gens = Array.isArray(generations) ? generations : [];
   const recentEvents = Array.isArray(events) ? events.slice(0, 10) : [];
@@ -145,6 +167,32 @@ export default function Dashboard() {
             )}
           </div>
         </div>
+
+        {/* Real-time Training Telemetry */}
+        {trainingData.length > 0 && (
+          <div className="card animate-in" style={{ marginTop: 20, border: '1px solid rgba(99,102,241,0.3)' }}>
+            <div className="card-header">
+              <div className="card-title" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <span className="pulse-dot"></span>
+                Live Training Telemetry
+              </div>
+              <span className="badge badge-indigo">Genome: {currentEval?.slice(0, 8)}...</span>
+            </div>
+            <div className="chart-container">
+              <ResponsiveContainer width="100%" height={200}>
+                <AreaChart data={trainingData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(99,102,241,0.08)" />
+                  <XAxis dataKey="batch" stroke="#6b7280" fontSize={11} label={{ value: 'Batch', position: 'insideBottom', offset: -5, fontSize: 10 }} />
+                  <YAxis stroke="#6b7280" fontSize={11} label={{ value: 'Loss', angle: -90, position: 'insideLeft', fontSize: 10 }} />
+                  <Tooltip
+                    contentStyle={{ background: '#1a2035', border: '1px solid rgba(99,102,241,0.2)', borderRadius: 8, fontSize: 12 }}
+                  />
+                  <Area type="monotone" dataKey="loss" stroke="#f43f5e" fill="rgba(244,63,94,0.1)" strokeWidth={2} name="Loss" />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+        )}
 
         {/* Recent Events */}
         <div className="card animate-in" style={{ marginTop: 20 }}>

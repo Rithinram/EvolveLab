@@ -133,3 +133,46 @@ export function usePolling(fetchFn, intervalMs = 3000, deps = []) {
 
   return { data, loading, error, refetch: fetchData };
 }
+
+// ── WebSocket Hook ───────────────────────────────────────────
+
+export function useWebSocket(path = '/ws/evolution', onMessage = null) {
+  const [isConnected, setIsConnected] = useState(false);
+  const ws = useRef(null);
+
+  useEffect(() => {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const host = window.location.host;
+    const url = `${protocol}//${host}${path}`;
+
+    ws.current = new WebSocket(url);
+
+    ws.current.onopen = () => {
+      setIsConnected(true);
+      console.log('WebSocket connected');
+    };
+
+    ws.current.onclose = () => {
+      setIsConnected(false);
+      console.log('WebSocket disconnected');
+    };
+
+    ws.current.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      if (onMessage) onMessage(data);
+    };
+
+    return () => {
+      if (ws.current) ws.current.close();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [path]);
+
+  const sendMessage = (message) => {
+    if (ws.current && isConnected) {
+      ws.current.send(typeof message === 'string' ? message : JSON.stringify(message));
+    }
+  };
+
+  return { isConnected, sendMessage };
+}

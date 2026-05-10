@@ -27,6 +27,7 @@ db = DatabaseManager(config.get("database", {}).get("url", "sqlite:///evolvelab.
 engine: Optional[EvolutionEngine] = None
 ws_manager = WebSocketManager()
 evolution_thread: Optional[threading.Thread] = None
+engine_lock = threading.Lock()
 
 
 @asynccontextmanager
@@ -81,8 +82,9 @@ def get_status():
 def start_evolution(req: EvolutionStartRequest = None):
     global engine, evolution_thread
 
-    if engine and engine.running:
-        return {"error": "Evolution already running"}
+    with engine_lock:
+        if engine and engine.running:
+            return {"error": "Evolution already running"}
 
     cfg = load_config()
     if req:

@@ -6,6 +6,7 @@ Orchestrates the full evolutionary loop across all agents.
 import time
 import logging
 import random
+import torch
 from typing import Optional, Callable, List, Dict, Any
 from collections import defaultdict
 
@@ -20,6 +21,9 @@ from agents.crossover import CrossoverAgent
 from agents.meta_prompt import MetaPromptAgent
 from memory.memory_store import MemoryStore
 from database.crud import DatabaseManager
+from training.proxy_evaluator import ProxyEvaluator
+from training.pytorch_evaluator import PyTorchEvaluator
+from utils.hardware import get_compute_capability
 
 logger = logging.getLogger("evolvelab.engine")
 
@@ -36,6 +40,7 @@ class EvolutionEngine:
         self.checkpoint_interval = evo_cfg.get("checkpoint_interval", 5)
 
         self.fitness_config = self.config.get("fitness", {})
+        self.eval_cfg = self.config.get("evaluation", {})
 
         # Database
         self.db = db or DatabaseManager(self.config.get("database", {}).get("url", "sqlite:///evolvelab.db"))
@@ -50,6 +55,10 @@ class EvolutionEngine:
 
         # Memory
         self.memory = MemoryStore()
+        
+        # Adaptive Hardware
+        self.hw_profile = get_compute_capability()
+        self.proxy_evaluator = ProxyEvaluator(device=self.hw_profile["device"])
 
         # State
         self.current_generation = 0
@@ -71,6 +80,12 @@ class EvolutionEngine:
     def set_event_callback(self, callback: Callable):
         """Set callback for real-time event broadcasting."""
         self._event_callback = callback
+        
+        # Propagate batch telemetry to evaluator
+        def on_batch_telemetry(data):
+            self._emit("training_batch", data)
+            
+        self.evaluator.set_on_batch_callback(on_batch_telemetry)
 
     def _emit(self, event_type: str, data: dict):
         """Emit an event to the callback and DB."""
@@ -163,11 +178,13 @@ class EvolutionEngine:
         population.add_many(genomes)
 
         # 2. Evaluate
+        fidelity = self._get_fidelity(gen)
         self._emit("evaluation_start", {
-            "description": f"Evaluating {population.size} genomes",
+            "description": f"Evaluating {population.size} genomes (fidelity: {fidelity} epochs)",
             "count": population.size,
+            "fidelity": fidelity,
         })
-        self.evaluator.evaluate_population(population.genomes, self.fitness_config)
+        self.evaluator.evaluate_population(population.genomes, fidelity=fidelity)
 
         # 3. Rank
         population.assign_ranks()
@@ -265,24 +282,43 @@ class EvolutionEngine:
         return gen_stats
 
     def _generate_initial_population(self, generation: int) -> List[Genome]:
-        """Generate initial population from builder agents."""
-        genomes = []
-        per_agent = max(1, self.population_size // len(self.builders))
-        remainder = self.population_size - per_agent * len(self.builders)
+        """
+        Generate initial population from builder agents.
+        Uses Proxy Warmup: Generates N-x candidates and picks the best by Synflow.
+        """
+        ratio = self.hw_profile.get("proxy_ratio", 3)
+        candidate_size = self.population_size * ratio
+        candidates = []
+        
+        per_agent = max(1, candidate_size // len(self.builders))
+        remainder = candidate_size - per_agent * len(self.builders)
+
+        logger.info(f"Warmup: Generating {candidate_size} candidates for screening...")
 
         for i, agent in enumerate(self.builders):
             count = per_agent + (1 if i < remainder else 0)
             agent_genomes = agent.generate(generation, count, self.memory)
-            genomes.extend(agent_genomes)
+            candidates.extend(agent_genomes)
 
-            self._emit("genome_generated", {
-                "agent_id": agent.id,
-                "agent_species": agent.species,
-                "count": count,
-                "description": f"Agent {agent.species} generated {count} genomes",
-            })
+        # Proxy Screening
+        self._emit("warmup_start", {"candidate_count": len(candidates)})
+        
+        scored_candidates = []
+        for g in candidates:
+            res = self.proxy_evaluator.score_genome(g, proxy_type="synflow")
+            g.metrics["proxy_score"] = res["proxy_score"]
+            scored_candidates.append(g)
+            
+        # Sort by proxy score and take top N
+        scored_candidates.sort(key=lambda x: x.metrics.get("proxy_score", 0), reverse=True)
+        final_population = scored_candidates[:self.population_size]
+        
+        self._emit("warmup_complete", {
+            "top_proxy_score": final_population[0].metrics["proxy_score"],
+            "description": f"Warmup complete. Selected top {self.population_size} from {len(candidates)} candidates."
+        })
 
-        return genomes[:self.population_size]
+        return final_population
 
     def _evolve_population(self, generation: int):
         """Evolve new population from previous generation's survivors.
@@ -488,6 +524,19 @@ class EvolutionEngine:
     def stop(self):
         self.running = False
         logger.info("Evolution stopping")
+
+    def _get_fidelity(self, gen: int) -> int:
+        """Determine the number of training epochs based on generation."""
+        # Simple adaptive schedule:
+        # Gen 0-2: 1 epoch
+        # Gen 3-5: 3 epochs
+        # Gen 6+: 5 epochs
+        if gen <= 2:
+            return 1
+        elif gen <= 5:
+            return 3
+        else:
+            return self.eval_cfg.get("fidelity", 5)
 
     def get_status(self) -> dict:
         """Get current evolution status."""
