@@ -1,178 +1,153 @@
-Here's a dense audit across the codebase, organized by severity and category.
+
+Here's what remains broken or newly introduced after the fixes:
 
 ---
 
-## Critical / Correctness Bugs
+## Still Broken
 
-**`backend/websocket.py` — `sync_broadcast` is broken**
-
-```python
-loop = asyncio.get_event_loop()
-if loop.is_running():
-    asyncio.ensure_future(self.broadcast(message))
-```
-
-`asyncio.ensure_future` called from a non-async thread without a running loop in that thread's context. `ensure_future` requires the coroutine be scheduled on the *event loop's* thread. Use `asyncio.run_coroutine_threadsafe(self.broadcast(message), loop)` instead, caching the loop reference at startup (not at call time via `get_event_loop`).
-
-**`database/crud.py` — Session leak on exception paths**
-
-Every method does `session = self.get_session()` then `finally: session.close()`, but `get_session()` returns a raw `Session` without being used as a context manager. If the session factory itself throws, `session` is unbound and the `finally` block will `NameError`. Use `with self.SessionFactory() as session:` (SQLAlchemy 1.4+ supports this).
-
-**`evolution/engine.py` — `engine_lock` never guards the engine assignment**
+**`database/crud.py` — `SessionFactory` doesn't support context manager protocol**
 
 ```python
-with engine_lock:
-    if engine and engine.running:
-        return {"error": "Evolution already running"}
-# ← engine assigned OUTSIDE the lock
-engine = EvolutionEngine(cfg, db)
+with self.SessionFactory() as session:
 ```
 
-Classic TOCTOU. Two concurrent requests both pass the guard, then both create engines and start threads. The lock needs to wrap the check+assign atomically.
+`sessionmaker()` returns a factory whose instances are `Session` objects. `Session` supports `__enter__`/`__exit__` only in SQLAlchemy 1.4+ with `Session(bind=engine)` directly, not via a factory-produced session in all configurations. The safe pattern is:
 
-**`training/code_generator.py` — `exec()` with user-controlled `genome` data**
+```python
+session = self.SessionFactory()
+try:
+    ...
+    session.commit()
+    return result
+except Exception as e:
+    session.rollback()
+    raise
+finally:
+    session.close()
+```
 
-The `validate_genome` regex check is insufficient. It lowercases the arch string and checks for `"import"`, but:
+Or configure the factory with `autoclose=True` and use `with Session(engine) as session:` instead of the factory pattern entirely.
 
-* `{"type": "IMPORT"}` passes (it converts to lowercase but only for pattern matching, and the check is on `arch_str = str(genome.architecture).lower()` — actually this is fine)
-* More critically, `layer.get("params", {})` values are never validated. A param value like `"__import__('os').system('rm -rf /')"` would pass the layer name check (name is fine) but the value goes directly into `exec`'d code via f-strings in `_translate_layer`. The activation function is interpolated directly: `F.{layer.get('params', {}).get('activation', 'relu')}` — this must be whitelisted, not passed raw.
+**`database/crud.py` — `get_genome_lineage` opens N sessions in a loop**
 
-**`agents/crossover.py` — `_validate_and_fix_dimensions` is dead on genomes without DAG nodes**
+```python
+def get_genome_lineage(self, genome_id: str, max_depth: int = 10) -> List[dict]:
+    for _ in range(max_depth):
+        genome = self.get_genome(current_id)  # Opens/closes session each iteration
+```
 
-The method only handles `attention.dim` as a "known input expectation". In practice, dense→attention transitions and conv→dense transitions (which go through flatten) aren't modeled, so the adapter insertion misses the most common dimension mismatches in the actual genome schema.
+Each call to `get_genome` opens and closes a separate session. For a depth-10 lineage that's 10 round-trips. Load the full lineage in a single recursive CTE query instead.
+
+**`backend/api.py` — `pause_evolution`, `resume_evolution`, `stop_evolution` still read `engine` without the lock**
+
+```python
+@app.post("/api/evolution/pause")
+def pause_evolution():
+    if engine and engine.running:  # ← race: engine could be None or swapped here
+        engine.pause()
+```
+
+The fix applied to `get_status` was not applied to these three endpoints. All reads of the global `engine` need `with engine_lock:`.
+
+**`backend/api.py` — `restore_checkpoint` assigns to global `engine` without the lock**
+
+```python
+@app.post("/api/checkpoints/{cp_id}/restore")
+def restore_checkpoint(cp_id: int):
+    global engine
+    ...
+    engine = EvolutionEngine(cfg, db)  # ← unsynchronized write
+```
 
 ---
 
-## Race Conditions / Thread Safety
+## New Issues Introduced
 
-**`backend/api.py` — Global mutable state shared across threads**
+**`training/pytorch_evaluator.py` — `gc.collect()` runs even on success path, every evaluation**
 
 ```python
-engine: Optional[EvolutionEngine] = None
-evolution_thread: Optional[threading.Thread] = None
+finally:
+    if model is not None:
+        del model
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 ```
 
-`engine` is read in `get_status`, `pause_evolution`, `resume_evolution`, `stop_evolution` without holding `engine_lock`. Any of these can race with `start_evolution` or the evolution thread completing and setting `engine.running = False`.
+`gc.collect()` is an O(heap) operation. Running it after every single genome evaluation (potentially hundreds per run) adds measurable overhead, especially on CPU where there's no CUDA cache to justify it. Restrict to OOM recovery or call it every N evaluations.
 
-**`evolution/engine.py` — `self.running` / `self.paused` accessed from two threads**
+**`training/pytorch_evaluator.py` — `import math` inside a hot loop**
 
-The evolution runs in a daemon thread, while `pause()` / `resume()` / `stop()` are called from FastAPI's thread pool. These boolean writes are not protected by a lock. CPython's GIL makes this *usually* safe for simple booleans, but it's undefined behavior in the language spec. Use `threading.Event` instead.
+```python
+def evaluate_population(self, genomes, fidelity, on_batch):
+    for genome in genomes:
+        ...
+        import math  # ← inside the loop body
+        param_penalty = math.log10(params + 1) / 7.0
+```
+
+Module imports inside loops are cached by Python after the first call so this isn't a correctness bug, but it's misleading style and a lint error. Move to top-level import.
 
 ---
 
-## Memory / Resource Issues
+## Issues From Before That Were Not Fixed
 
-**`training/pytorch_evaluator.py` — GPU memory not cleared on OOM path**
-
-```python
-except RuntimeError as e:
-    if "out of memory" in str(e).lower():
-        return {..., "error": "OOM"}
-```
-
-The `finally` block does `torch.cuda.empty_cache()`, but `del model` only runs `if model is not None`. On OOM during `ModelClass(...)` instantiation, `model` stays `None`, but partial CUDA allocations from the failed instantiation are not freed by `empty_cache()` alone — you need to also call the garbage collector explicitly: `import gc; gc.collect(); torch.cuda.empty_cache()`.
-
-**`training/pytorch_evaluator.py` — `_loaders_cache` holds DataLoader references forever**
-
-DataLoaders pin memory workers (even with `num_workers=0` they hold dataset references in memory). The cache grows unbounded across generations. The dataset name set is small, so this isn't catastrophic, but the underlying dataset objects (60K MNIST samples in RAM) are never released even if the evaluator switches modes.
-
-**`memory/memory_store.py` — `mutation_deltas` cap is applied after-the-fact**
-
-```python
-self.mutation_deltas[mutation_type].append(delta)
-if len(self.mutation_deltas[mutation_type]) > self.MAX_HISTORY:
-    self.mutation_deltas[mutation_type] = self.mutation_deltas[mutation_type][-self.MAX_HISTORY:]
-```
-
-This allocates `MAX_HISTORY + 1` entries before trimming every call. Use `collections.deque(maxlen=MAX_HISTORY)` to avoid the repeated slice allocation.
-
----
-
-## Logic / Algorithmic Issues
-
-**`training/heuristic.py` — `estimate_param_count` is called inside `evaluate` but `genome.metrics` has a side effect**
-
-`evaluate` calls `genome.estimate_param_count()` which writes `self.metrics["param_count"]`. But `EvaluatorAgent.evaluate_population` then calls `genome.metrics.update(metrics)` which would overwrite it with a possibly different value from heuristic. The write order is fragile.
-
-**`agents/crossover.py` — Crossover can produce 0-layer genomes**
-
-```python
-child_layers = layers_a[:point_a] + layers_b[point_b:]
-if len(child_layers) < 1:
-    child_layers = [layers_a[0]] if layers_a else [layers_b[0]]
-```
-
-`point_a = 0` and `point_b = len(layers_b)` is a valid random outcome — produces an empty list, then falls through to the 1-layer fallback. But the single-layer fallback might be a `batch_norm` or `dropout` layer as the entire architecture, which will produce a degenerate (and possibly broken) model.
-
-**`evolution/engine.py` — `_close_mutation_feedback` uses `prev_avg` as baseline when `fitness_before` is None**
-
-The comment is correct that children of crossover have no pre-mutation fitness. But the fix (using `prev_avg`) means a mutation that produces a genome with fitness *above the previous generation's average* is marked successful, even if it's below the elite's fitness. The adaptive weight calculation will skew toward mutations that simply beat an already-outdated baseline.
-
-**`agents/selection.py` — Diversity injection can swap out an elite**
-
-```python
-selected[-1] = diverse  # Replace weakest selection
-```
-
-If `elite_count >= num_parents - 1`, `selected[-1]` could be an elite. There's no guard ensuring elites are preserved when diversity injection fires.
-
-**`training/code_generator.py` — `_generate_dag_code` uses `LazyConv2d` for all alignment ops**
-
-The alignment modules `self.align_{p}_to_{n}` are always registered as `LazyConv2d`, but input tensors might be already-flattened 1D tensors at that point in the graph (e.g., after a Dense node). Applying Conv2d to a 2D tensor (batch × features) will crash.
-
----
-
-## Security
-
-**`training/code_generator.py` — `validate_genome` doesn't cover `params` values**
-
-Already noted above. Specifically:
+**`training/code_generator.py` — Activation function injection still unsanitized**
 
 ```python
 forward_steps.append(f"x = F.{layer.get('params', {}).get('activation', 'relu')}(self.{l_id}(x))")
 ```
 
-A genome with `{"activation": "dropout"}` would call `F.dropout(...)` which is valid but unexpected. More critically, `{"activation": "__import__('os').system('id')"}` would produce executable injection. Whitelist activations: `VALID_ACTIVATIONS = {"relu", "gelu", "silu", "sigmoid", "tanh", "leaky_relu"}`.
-
-**`backend/api.py` — No rate limiting or auth on evolution control endpoints**
-
-`POST /api/evolution/start` is publicly accessible. Any client can trigger unbounded PyTorch training. If deployed anywhere beyond localhost, this is a remote compute abuse vector.
-
----
-
-## Design / Architecture Issues
-
-**`training/datasets/__init__.py` — `get_dataset_loaders` with `num_workers=0` hardcoded**
-
-Removes multiprocessing entirely. On CPU machines, data loading becomes the bottleneck during real training. This should come from hardware profile: `num_workers = min(4, hw_profile["cores"] // 2)`.
-
-**`evolution/engine.py` — `_generate_initial_population` ratio logic doesn't distribute evenly**
+The activation string is still interpolated directly into `exec`'d code. `validate_genome` checks `layer.get("type")` with a regex, but not `params` values. A genome with `{"activation": "dropout + os.system('id') #"}` still passes validation and produces injectable code. Add a whitelist:
 
 ```python
-per_agent = max(1, candidate_size // len(self.builders))
-remainder = candidate_size - per_agent * len(self.builders)
+VALID_ACTIVATIONS = {"relu", "gelu", "silu", "sigmoid", "tanh", "leaky_relu", "elu"}
+activation = layer.get("params", {}).get("activation", "relu")
+if activation not in VALID_ACTIVATIONS:
+    activation = "relu"
 ```
 
-The remainder is distributed only to the first `remainder` agents (indices 0 to `remainder-1`). With 5 agents and `candidate_size=24`, `per_agent=4`, `remainder=4` — so 4 agents get 5 and 1 gets 4. This is cosmetically fine, but the first agent (transformer_specialist) always gets the extra, systematically overrepresenting it in the warmup pool.
+**`evolution/engine.py` — `_generate_initial_population` crashes if all candidates fail proxy scoring**
 
-**`agents/mutation.py` — `_modify_layer` mutates in-place on a shallow copy**
+```python
+final_population = scored_candidates[:self.population_size]
+self._emit("warmup_complete", {
+    "top_proxy_score": final_population[0].metrics["proxy_score"],  # IndexError if empty
+```
 
-`mutant = genome.clone(new_id=True)` does `copy.deepcopy(self)`, so mutations are safe. But `layers = genome.architecture.get("layers", [])` in `_apply_mutation` grabs the reference from `mutant`, and then direct `layer["units"] = ...` mutations work correctly. This is actually fine, but the comment about `genome` vs `mutant` is confusing since `_apply_mutation` receives `mutant` named `genome`.
+If `ProxyEvaluator` returns `status: error` for all candidates (e.g., PyTorch not installed), `scored_candidates` is populated but all have `proxy_score=0`. The slice is fine, but if `population_size > len(scored_candidates)` (e.g., proxy errors reduced the pool), `final_population` could be shorter than expected. No guard exists.
 
-**`backend/websocket.py` — `_event_queue: asyncio.Queue = None` declared but never used**
+**`agents/crossover.py` — Minimum layer count fallback selects structurally invalid layers**
 
-Dead code that misleads readers into thinking there's an async queue-based broadcast pattern.
+```python
+if len(child_layers) < 1:
+    child_layers = [layers_a[0]] if layers_a else [layers_b[0]]
+```
 
-**`configs/default.json` — `"evaluation.mode": "heuristic"` but `requirements.txt` doesn't include `torch`**
+`layers_a[0]` could be `{"type": "batch_norm"}` or `{"type": "dropout", "rate": 0.3}` — layers that have no meaningful output on their own and will crash the code generator (BatchNorm2d with unknown channels, no Conv2d preceding it). The fallback should guarantee at least one conv or dense layer.
 
-The requirements file has `torchinfo` but no `torch` or `torchvision`. The system silently works in heuristic mode but will fail at import time in `training/pytorch_evaluator.py` and `training/proxy_evaluator.py` if PyTorch isn't installed separately (e.g., fresh CI environment). Torch should be in requirements with an appropriate index URL, or conditionally imported.
+**`agents/selection.py` — Diversity threshold logic is inverted**
 
----
+```python
+def _needs_diversity(self, selected: List[Genome]) -> bool:
+    species = set(g.species for g in selected)
+    return len(species) / len(selected) < self.diversity_threshold
+```
 
-## Test Coverage Gaps
+`diversity_threshold` defaults to `0.15`. With 5 species across 8 selected genomes, `5/8 = 0.625`, which is `> 0.15`, so diversity injection never triggers. With 1 species, `1/8 = 0.125 < 0.15`, so it triggers. The threshold is calibrated for nearly homogeneous populations only. With the 5 distinct species in the default config, this will essentially never fire. The threshold should be `> 0.5` or the metric should be defined differently (e.g., Gini coefficient over species counts).
 
-* `tests/test_integration.py` — `evaluation.dataset = "synthetic"` bypasses real data loading; doesn't test the `_get_loaders` cache or actual MNIST path.
-* `tests/test_graph_utils.py` — No test for `get_node_depths`. No test for `get_leaf_nodes` when *all* nodes have outgoing edges (should return empty list).
-* `agents/meta_prompt.py` — Zero test coverage on the prompt mutation strategy selection logic (the `improving`/`declining` branch).
-* `agents/selection.py` — No test for the diversity injection path; the elite-overwrite bug above would be caught here.
-* `training/heuristic.py` — No tests at all; given it's the default evaluation mode, this is the highest-ROI missing coverage.
+**`memory/memory_store.py` — `mutation_deltas` still uses list slice instead of deque**
+
+The cap is applied via slice after-the-fact on every append, allocating `MAX_HISTORY + 1` elements each time instead of using `deque(maxlen=50)`. Same for `species_fitness`, `species_survival`, `prompt_fitness_history`, and `generation_stats` — all have the same pattern. Not a correctness bug but unnecessary allocation at scale.
+
+**`database/models.py` — `datetime.datetime.utcnow` is deprecated in Python 3.12+**
+
+```python
+timestamp = Column(DateTime, default=datetime.datetime.utcnow)
+```
+
+`datetime.utcnow()` is deprecated since Python 3.12 and removed in future versions. Replace with `datetime.datetime.now(datetime.timezone.utc)` and store as timezone-aware, or use `func.now()` in SQLAlchemy for DB-side timestamps.
+
+**`.github/workflows/ci.yml` — Tests require torch/torchvision but neither is in `requirements.txt`**
+
+The CI installs `requirements.txt` and then runs `pytest tests/`. Every test in `tests/` imports from `training.*` which imports `torch`. The CI will fail with `ModuleNotFoundError: No module named 'torch'` on a fresh Ubuntu runner. Add a CPU-only torch install step or add `torch` and `torchvision` to requirements with the `--index-url https://download.pytorch.org/whl/cpu` index.

@@ -101,7 +101,17 @@ class CrossoverAgent:
         if len(child_layers) > 12:
             child_layers = child_layers[:12]
         if len(child_layers) < 1:
-            child_layers = [layers_a[0]] if layers_a else [layers_b[0]]
+            # Guarantee at least one compute layer (not batch_norm/dropout alone)
+            compute_types = {"conv2d", "dense"}
+            fallback = None
+            for src in (layers_a, layers_b):
+                for l in src:
+                    if l.get("type") in compute_types:
+                        fallback = l
+                        break
+                if fallback:
+                    break
+            child_layers = [fallback] if fallback else [{"type": "conv2d", "params": {"filters": 32, "kernel": 3, "activation": "relu"}}]
 
         # Inherit architecture type from fitter parent
         fit_a = pa.metrics.get("fitness_score") or 0

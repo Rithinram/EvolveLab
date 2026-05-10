@@ -6,6 +6,7 @@ Executes real training loops for genomes using generated code.
 import time
 import logging
 import gc
+import math
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -31,6 +32,8 @@ class PyTorchEvaluator:
         self.device = torch.device(self.hw_profile["device"])
         
         self._loaders_cache = {}
+        self._eval_count = 0
+        self._gc_interval = 10  # Run gc.collect() every N evaluations
         logger.info(f"PyTorch Evaluator initialized on {self.device} (Profile: {self.hw_profile['profile']})")
 
     def _get_loaders(self, dataset_name):
@@ -201,7 +204,9 @@ class PyTorchEvaluator:
             if model is not None:
                 del model
             
-            gc.collect()
+            self._eval_count += 1
+            if self._eval_count % self._gc_interval == 0:
+                gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
@@ -226,7 +231,6 @@ class PyTorchEvaluator:
                 
                 # Multi-Objective Fitness: Fitness = alpha * Acc - beta * log10(Params)
                 # This encourages small models without being too aggressive.
-                import math
                 param_penalty = math.log10(params + 1) / 7.0 # Normalize log(params) to ~0-1 range
                 
                 fitness = (acc_w * acc) - (cost_w * param_penalty)

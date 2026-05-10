@@ -6,7 +6,7 @@ Tracks mutation success rates, best patterns, and species statistics.
 
 import logging
 from typing import Dict, List, Optional, Any
-from collections import defaultdict
+from collections import defaultdict, deque
 
 logger = logging.getLogger("evolvelab.memory")
 
@@ -22,22 +22,22 @@ class MemoryStore:
         # Mutation type success tracking
         self.mutation_successes: Dict[str, int] = defaultdict(int)
         self.mutation_attempts: Dict[str, int] = defaultdict(int)
-        self.mutation_deltas: Dict[str, List[float]] = defaultdict(list)
+        self.mutation_deltas: Dict[str, deque] = defaultdict(lambda: deque(maxlen=MemoryStore.MAX_HISTORY))
 
         # Best architecture patterns
         self.best_patterns: List[dict] = []
         self.max_patterns = 20
 
         # Species performance tracking
-        self.species_fitness: Dict[str, List[float]] = defaultdict(list)
-        self.species_survival: Dict[str, List[bool]] = defaultdict(list)
+        self.species_fitness: Dict[str, deque] = defaultdict(lambda: deque(maxlen=MemoryStore.MAX_HISTORY))
+        self.species_survival: Dict[str, deque] = defaultdict(lambda: deque(maxlen=MemoryStore.MAX_SURVIVAL_HISTORY))
 
         # Prompt success tracking
-        self.prompt_fitness_history: Dict[str, List[float]] = defaultdict(list)
+        self.prompt_fitness_history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=MemoryStore.MAX_HISTORY))
         self.best_prompts: Dict[str, dict] = {}
 
         # Generation-level statistics
-        self.generation_stats: List[dict] = []
+        self.generation_stats: deque = deque(maxlen=MemoryStore.MAX_HISTORY)
 
         logger.info("Memory store initialized")
 
@@ -47,9 +47,6 @@ class MemoryStore:
         self.mutation_attempts[mutation_type] += 1
         delta = fitness_after - fitness_before
         self.mutation_deltas[mutation_type].append(delta)
-        # Cap rolling window
-        if len(self.mutation_deltas[mutation_type]) > self.MAX_HISTORY:
-            self.mutation_deltas[mutation_type] = self.mutation_deltas[mutation_type][-self.MAX_HISTORY:]
 
         if delta > 0:
             self.mutation_successes[mutation_type] += 1
@@ -104,11 +101,6 @@ class MemoryStore:
         """Track species-level performance."""
         self.species_fitness[species].append(fitness)
         self.species_survival[species].append(survived)
-        # Cap rolling windows
-        if len(self.species_fitness[species]) > self.MAX_HISTORY:
-            self.species_fitness[species] = self.species_fitness[species][-self.MAX_HISTORY:]
-        if len(self.species_survival[species]) > self.MAX_SURVIVAL_HISTORY:
-            self.species_survival[species] = self.species_survival[species][-self.MAX_SURVIVAL_HISTORY:]
 
     def get_species_stats(self) -> Dict[str, dict]:
         """Get aggregated species statistics."""
@@ -127,9 +119,6 @@ class MemoryStore:
     def record_prompt_fitness(self, agent_id: str, fitness: float, prompt_data: dict):
         """Track prompt performance for an agent."""
         self.prompt_fitness_history[agent_id].append(fitness)
-        # Cap rolling window
-        if len(self.prompt_fitness_history[agent_id]) > self.MAX_HISTORY:
-            self.prompt_fitness_history[agent_id] = self.prompt_fitness_history[agent_id][-self.MAX_HISTORY:]
         current_best = self.best_prompts.get(agent_id, {}).get("fitness", -999)
         if fitness > current_best:
             self.best_prompts[agent_id] = {**prompt_data, "fitness": fitness}
@@ -141,9 +130,6 @@ class MemoryStore:
     def record_generation_stats(self, stats: dict):
         """Store generation-level statistics."""
         self.generation_stats.append(stats)
-        # Cap rolling window
-        if len(self.generation_stats) > self.MAX_HISTORY:
-            self.generation_stats = self.generation_stats[-self.MAX_HISTORY:]
 
     def get_recommended_architecture(self) -> Optional[dict]:
         """Recommend architecture patterns based on best performers."""

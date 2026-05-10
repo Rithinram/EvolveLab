@@ -115,25 +115,28 @@ def start_evolution(req: EvolutionStartRequest = None):
 
 @app.post("/api/evolution/pause")
 def pause_evolution():
-    if engine and engine.running:
-        engine.pause()
-        return {"status": "paused"}
+    with engine_lock:
+        if engine and engine.running:
+            engine.pause()
+            return {"status": "paused"}
     return {"error": "No evolution running"}
 
 
 @app.post("/api/evolution/resume")
 def resume_evolution():
-    if engine and engine.paused:
-        engine.resume()
-        return {"status": "resumed"}
+    with engine_lock:
+        if engine and engine.paused:
+            engine.resume()
+            return {"status": "resumed"}
     return {"error": "Evolution not paused"}
 
 
 @app.post("/api/evolution/stop")
 def stop_evolution():
-    if engine and engine.running:
-        engine.stop()
-        return {"status": "stopping"}
+    with engine_lock:
+        if engine and engine.running:
+            engine.stop()
+            return {"status": "stopping"}
     return {"error": "No evolution running"}
 
 
@@ -248,13 +251,14 @@ def restore_checkpoint(cp_id: int):
     if not cp:
         return {"error": "Checkpoint not found"}
 
-    if engine and engine.running:
-        return {"error": "Cannot restore while evolution is running"}
+    with engine_lock:
+        if engine and engine.running:
+            return {"error": "Cannot restore while evolution is running"}
 
-    # Create a fresh engine and restore state from checkpoint
-    cfg = load_config()
-    engine = EvolutionEngine(cfg, db)
-    engine.restore_from_checkpoint(cp)
+        # Create a fresh engine and restore state from checkpoint
+        cfg = load_config()
+        engine = EvolutionEngine(cfg, db)
+        engine.restore_from_checkpoint(cp)
 
     return {
         "status": "restored",

@@ -15,6 +15,10 @@ from utils.graph import get_topological_sort, get_leaf_nodes
 
 logger = logging.getLogger("evolvelab.code_generator")
 
+# Whitelist of safe activation functions that can be used in exec()'d code
+VALID_ACTIVATIONS = {"relu", "gelu", "silu", "sigmoid", "tanh", "leaky_relu", "elu", "relu6", "mish"}
+
+
 class CodeGenerator:
     """Orchestrates PyTorch code generation from an EvolveLab Genome."""
 
@@ -186,7 +190,10 @@ class CodeGenerator:
             else:
                 module_defs.append(f"{self.indent}{self.indent}self.{l_id} = nn.Conv2d({current_channels}, {out_channels}, kernel_size={kernel}, padding={kernel//2})")
             
-            forward_steps.append(f"x = F.{layer.get('params', {}).get('activation', 'relu')}(self.{l_id}(x))")
+            activation = layer.get('params', {}).get('activation', 'relu')
+            if activation not in VALID_ACTIVATIONS:
+                activation = 'relu'
+            forward_steps.append(f"x = F.{activation}(self.{l_id}(x))")
             current_channels = out_channels
             
         elif l_type == "dense":
@@ -197,7 +204,10 @@ class CodeGenerator:
                 module_defs.append(f"{self.indent}{self.indent}self.{l_id} = nn.LazyLinear({layer.get('params', {}).get('units', 128)})")
             else:
                 module_defs.append(f"{self.indent}{self.indent}self.{l_id} = nn.Linear({current_channels}, {layer.get('params', {}).get('units', 128)})")
-            forward_steps.append(f"x = F.{layer.get('params', {}).get('activation', 'relu')}(self.{l_id}(x))")
+            activation = layer.get('params', {}).get('activation', 'relu')
+            if activation not in VALID_ACTIVATIONS:
+                activation = 'relu'
+            forward_steps.append(f"x = F.{activation}(self.{l_id}(x))")
             current_channels = layer.get("params", {}).get("units", 128)
 
         elif l_type == "pooling":

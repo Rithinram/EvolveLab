@@ -18,7 +18,7 @@ class SelectionAgent:
         evo_cfg = (config or {}).get("evolution", {})
         self.elite_count = evo_cfg.get("elite_count", 2)
         self.tournament_size = evo_cfg.get("tournament_size", 3)
-        self.diversity_threshold = evo_cfg.get("diversity_threshold", 0.15)
+        self.diversity_threshold = evo_cfg.get("diversity_threshold", 0.4)
         logger.info(
             "Selection agent: elites=%d, tournament=%d",
             self.elite_count, self.tournament_size

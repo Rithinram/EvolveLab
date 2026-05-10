@@ -313,9 +313,14 @@ class EvolutionEngine:
         scored_candidates.sort(key=lambda x: x.metrics.get("proxy_score", 0), reverse=True)
         final_population = scored_candidates[:self.population_size]
         
+        if not final_population:
+            logger.error("All proxy candidates failed. Falling back to unsorted candidates.")
+            final_population = candidates[:self.population_size]
+
+        top_score = final_population[0].metrics.get("proxy_score", 0) if final_population else 0
         self._emit("warmup_complete", {
-            "top_proxy_score": final_population[0].metrics["proxy_score"],
-            "description": f"Warmup complete. Selected top {self.population_size} from {len(candidates)} candidates."
+            "top_proxy_score": top_score,
+            "description": f"Warmup complete. Selected top {len(final_population)} from {len(candidates)} candidates."
         })
 
         return final_population

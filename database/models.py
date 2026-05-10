@@ -17,7 +17,7 @@ class Generation(Base):
     __tablename__ = "generations"
     id = Column(Integer, primary_key=True, autoincrement=True)
     number = Column(Integer, nullable=False, unique=True, index=True)
-    timestamp = Column(DateTime, default=datetime.datetime.utcnow)
+    timestamp = Column(DateTime, default=lambda: datetime.datetime.now(datetime.timezone.utc))
     population_size = Column(Integer, nullable=False)
     best_fitness = Column(Float, default=0.0)
     avg_fitness = Column(Float, default=0.0)
@@ -71,8 +71,8 @@ class Agent(Base):
     memory = Column(JSON, default=dict)
     prompt_strategy = Column(JSON, default=dict)
     performance_history = Column(JSON, default=list)
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.datetime.now(datetime.timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.datetime.now(datetime.timezone.utc), onupdate=lambda: datetime.datetime.now(datetime.timezone.utc))
 
 
 class PromptRecord(Base):
@@ -85,7 +85,7 @@ class PromptRecord(Base):
     parent_prompt_id = Column(Integer, default=None)
     mutation_type = Column(String, default=None)
     strategy_params = Column(JSON, default=dict)
-    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.datetime.now(datetime.timezone.utc))
 
 
 class MutationRecord(Base):
@@ -101,7 +101,7 @@ class MutationRecord(Base):
     fitness_after = Column(Float, default=None)
     fitness_delta = Column(Float, default=None)
     success = Column(Boolean, default=None)
-    timestamp = Column(DateTime, default=datetime.datetime.utcnow)
+    timestamp = Column(DateTime, default=lambda: datetime.datetime.now(datetime.timezone.utc))
 
 
 class Checkpoint(Base):
@@ -111,7 +111,7 @@ class Checkpoint(Base):
     engine_state = Column(JSON, nullable=False)
     population_snapshot = Column(JSON, default=list)
     agent_states = Column(JSON, default=dict)
-    timestamp = Column(DateTime, default=datetime.datetime.utcnow)
+    timestamp = Column(DateTime, default=lambda: datetime.datetime.now(datetime.timezone.utc))
 
 
 class EvolutionEvent(Base):
@@ -123,7 +123,7 @@ class EvolutionEvent(Base):
     genome_id = Column(String, default=None)
     description = Column(Text, default="")
     metadata_json = Column(JSON, default=dict)
-    timestamp = Column(DateTime, default=datetime.datetime.utcnow)
+    timestamp = Column(DateTime, default=lambda: datetime.datetime.now(datetime.timezone.utc))
 
 
 def create_db_engine(db_url="sqlite:///evolvelab.db", echo=False):
