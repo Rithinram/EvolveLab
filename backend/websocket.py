@@ -17,10 +17,15 @@ class WebSocketManager:
 
     def __init__(self):
         self.active_connections: List[WebSocket] = []
-        self._event_queue: asyncio.Queue = None
+        try:
+            self.loop = asyncio.get_event_loop()
+        except RuntimeError:
+            self.loop = None
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
+        if self.loop is None:
+            self.loop = asyncio.get_event_loop()
         self.active_connections.append(websocket)
         logger.info("WebSocket client connected (%d total)", len(self.active_connections))
 
@@ -48,11 +53,10 @@ class WebSocketManager:
 
     def sync_broadcast(self, message: dict):
         """Synchronous broadcast helper for use from evolution thread."""
+        if self.loop is None or not self.loop.is_running():
+            return
+            
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                asyncio.ensure_future(self.broadcast(message))
-            else:
-                loop.run_until_complete(self.broadcast(message))
-        except RuntimeError:
-            pass  # No event loop available
+            asyncio.run_coroutine_threadsafe(self.broadcast(message), self.loop)
+        except Exception as e:
+            logger.error(f"WS Sync Broadcast Error: {e}")

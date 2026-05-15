@@ -1,0 +1,19 @@
+# EvolveLab Frontend Dockerfile
+FROM node:18-slim AS builder
+
+WORKDIR /app
+
+# Install dependencies
+COPY frontend/package*.json ./
+RUN npm install
+
+# Build the frontend
+COPY frontend/ ./
+RUN npm run build
+
+# Serve with Nginx
+FROM nginx:stable-alpine
+COPY --from=builder /app/dist /usr/share/nginx/html
+# Copy custom nginx config if needed, otherwise use default
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]

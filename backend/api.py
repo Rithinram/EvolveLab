@@ -3,6 +3,7 @@ EvolveLab — FastAPI Backend
 REST API and WebSocket endpoints for the evolution system.
 """
 
+import json
 import threading
 import logging
 from typing import Optional
@@ -26,6 +27,7 @@ db = DatabaseManager(config.get("database", {}).get("url", "sqlite:///evolvelab.
 engine: Optional[EvolutionEngine] = None
 ws_manager = WebSocketManager()
 evolution_thread: Optional[threading.Thread] = None
+engine_lock = threading.Lock()
 
 
 @asynccontextmanager
@@ -63,8 +65,9 @@ def health():
 
 @app.get("/api/status")
 def get_status():
-    if engine:
-        return engine.get_status()
+    with engine_lock:
+        if engine:
+            return engine.get_status()
     return {
         "running": False, "paused": False, "current_generation": 0,
         "max_generations": 0, "population_size": 0,
@@ -80,9 +83,6 @@ def get_status():
 def start_evolution(req: EvolutionStartRequest = None):
     global engine, evolution_thread
 
-    if engine and engine.running:
-        return {"error": "Evolution already running"}
-
     cfg = load_config()
     if req:
         if req.population_size:
@@ -94,42 +94,49 @@ def start_evolution(req: EvolutionStartRequest = None):
         if req.cost_weight is not None:
             cfg["fitness"]["cost_weight"] = req.cost_weight
 
-    engine = EvolutionEngine(cfg, db)
-    engine.set_event_callback(ws_manager.sync_broadcast)
+    with engine_lock:
+        if engine and engine.running:
+            return {"error": "Evolution already running"}
 
-    def run_evolution():
-        try:
-            engine.run()
-        except Exception as e:
-            logger.error("Evolution thread error: %s", e, exc_info=True)
+        engine = EvolutionEngine(cfg, db)
+        engine.set_event_callback(ws_manager.sync_broadcast)
 
-    evolution_thread = threading.Thread(target=run_evolution, daemon=True)
-    evolution_thread.start()
+        def run_evolution():
+            try:
+                engine.run()
+            except Exception as e:
+                logger.error("Evolution thread error: %s", e, exc_info=True)
+
+        evolution_thread = threading.Thread(target=run_evolution, daemon=True)
+        evolution_thread.start()
 
     return {"status": "started", "population_size": engine.population_size, "max_generations": engine.max_generations}
 
 
 @app.post("/api/evolution/pause")
 def pause_evolution():
-    if engine and engine.running:
-        engine.pause()
-        return {"status": "paused"}
+    with engine_lock:
+        if engine and engine.running:
+            engine.pause()
+            return {"status": "paused"}
     return {"error": "No evolution running"}
 
 
 @app.post("/api/evolution/resume")
 def resume_evolution():
-    if engine and engine.paused:
-        engine.resume()
-        return {"status": "resumed"}
+    with engine_lock:
+        if engine and engine.paused:
+            engine.resume()
+            return {"status": "resumed"}
     return {"error": "Evolution not paused"}
 
 
 @app.post("/api/evolution/stop")
 def stop_evolution():
-    if engine and engine.running:
-        engine.stop()
-        return {"status": "stopping"}
+    with engine_lock:
+        if engine and engine.running:
+            engine.stop()
+            return {"status": "stopping"}
     return {"error": "No evolution running"}
 
 
@@ -238,10 +245,26 @@ def get_checkpoints():
 
 @app.post("/api/checkpoints/{cp_id}/restore")
 def restore_checkpoint(cp_id: int):
+    global engine
+
     cp = db.get_checkpoint(cp_id)
     if not cp:
         return {"error": "Checkpoint not found"}
-    return {"status": "restored", "generation": cp.get("generation_number")}
+
+    with engine_lock:
+        if engine and engine.running:
+            return {"error": "Cannot restore while evolution is running"}
+
+        # Create a fresh engine and restore state from checkpoint
+        cfg = load_config()
+        engine = EvolutionEngine(cfg, db)
+        engine.restore_from_checkpoint(cp)
+
+    return {
+        "status": "restored",
+        "generation": cp.get("generation_number"),
+        "best_fitness": cp.get("engine_state", {}).get("best_fitness", 0),
+    }
 
 
 # ── Events ─────────────────────────────────────────────────────
@@ -264,6 +287,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 await websocket.send_text('{"type": "pong"}')
             elif data == "status":
                 status = get_status()
-                await websocket.send_text(str(status))
+                await websocket.send_text(json.dumps(status))
     except WebSocketDisconnect:
         ws_manager.disconnect(websocket)

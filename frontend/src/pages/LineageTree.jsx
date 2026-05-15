@@ -30,7 +30,7 @@ export default function LineageTree() {
       const data = await getGenomeLineage(id);
       setLineage(data);
       setSelectedId(id);
-    } catch (e) {
+    } catch {
       setLineage(null);
     }
     setLoading(false);

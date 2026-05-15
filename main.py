@@ -28,6 +28,7 @@ def cmd_run(args):
     """Run evolution loop directly."""
     setup_logging("INFO")
     from evolution.engine import EvolutionEngine
+    from database.crud import DatabaseManager
 
     config = load_config()
     if args.gens:
@@ -35,7 +36,16 @@ def cmd_run(args):
     if args.pop:
         config["evolution"]["population_size"] = args.pop
 
-    engine = EvolutionEngine(config)
+    # Reset DB if requested (avoids UNIQUE constraint crashes on re-runs)
+    if args.reset:
+        db_url = config.get("database", {}).get("url", "sqlite:///evolvelab.db")
+        db = DatabaseManager(db_url)
+        db.reset()
+        print("  Database reset.")
+    else:
+        db = None
+
+    engine = EvolutionEngine(config, db)
 
     print("=" * 60)
     print("  EvolveLab — Evolution Engine")
@@ -115,6 +125,7 @@ def main():
     run_parser = subparsers.add_parser("run", help="Run evolution loop")
     run_parser.add_argument("--gens", type=int, help="Number of generations")
     run_parser.add_argument("--pop", type=int, help="Population size")
+    run_parser.add_argument("--reset", action="store_true", help="Reset database before running")
 
     # API command
     api_parser = subparsers.add_parser("api", help="Start API server")

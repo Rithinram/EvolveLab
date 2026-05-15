@@ -6,7 +6,7 @@
 import { usePolling, getSurvivalRates, getMutationAnalytics, getGenerations, getSpeciesDistribution } from '../api/client';
 import {
   BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid,
-  Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend
+  Tooltip, ResponsiveContainer, PieChart, Pie, Cell
 } from 'recharts';
 
 const COLORS = ['#6366f1', '#10b981', '#8b5cf6', '#22d3ee', '#f59e0b', '#f43f5e', '#3b82f6'];

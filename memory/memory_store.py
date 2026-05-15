@@ -6,7 +6,7 @@ Tracks mutation success rates, best patterns, and species statistics.
 
 import logging
 from typing import Dict, List, Optional, Any
-from collections import defaultdict
+from collections import defaultdict, deque
 
 logger = logging.getLogger("evolvelab.memory")
 
@@ -14,26 +14,30 @@ logger = logging.getLogger("evolvelab.memory")
 class MemoryStore:
     """Persistent evolutionary memory for the agent system."""
 
+    # Rolling window caps to prevent unbounded memory growth
+    MAX_HISTORY = 50
+    MAX_SURVIVAL_HISTORY = 100
+
     def __init__(self):
         # Mutation type success tracking
         self.mutation_successes: Dict[str, int] = defaultdict(int)
         self.mutation_attempts: Dict[str, int] = defaultdict(int)
-        self.mutation_deltas: Dict[str, List[float]] = defaultdict(list)
+        self.mutation_deltas: Dict[str, deque] = defaultdict(lambda: deque(maxlen=MemoryStore.MAX_HISTORY))
 
         # Best architecture patterns
         self.best_patterns: List[dict] = []
         self.max_patterns = 20
 
         # Species performance tracking
-        self.species_fitness: Dict[str, List[float]] = defaultdict(list)
-        self.species_survival: Dict[str, List[bool]] = defaultdict(list)
+        self.species_fitness: Dict[str, deque] = defaultdict(lambda: deque(maxlen=MemoryStore.MAX_HISTORY))
+        self.species_survival: Dict[str, deque] = defaultdict(lambda: deque(maxlen=MemoryStore.MAX_SURVIVAL_HISTORY))
 
         # Prompt success tracking
-        self.prompt_fitness_history: Dict[str, List[float]] = defaultdict(list)
+        self.prompt_fitness_history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=MemoryStore.MAX_HISTORY))
         self.best_prompts: Dict[str, dict] = {}
 
         # Generation-level statistics
-        self.generation_stats: List[dict] = []
+        self.generation_stats: deque = deque(maxlen=MemoryStore.MAX_HISTORY)
 
         logger.info("Memory store initialized")
 
