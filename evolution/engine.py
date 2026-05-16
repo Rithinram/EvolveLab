@@ -119,7 +119,13 @@ class EvolutionEngine:
             self.db.save_agent(agent.to_dict())
 
         try:
-            for gen in range(self.current_generation, self.max_generations):
+            start_gen = self.current_generation
+            if self.history or self.current_generation > 0:
+                 # If we have history or are past gen 0, the next gen is N+1
+                 start_gen = self.current_generation + 1
+                 logger.info("Resuming evolution from generation %d", start_gen)
+
+            for gen in range(start_gen, self.max_generations):
                 if not self.running:
                     logger.info("Evolution stopped at generation %d", gen)
                     break
@@ -136,7 +142,7 @@ class EvolutionEngine:
                     on_generation(gen, gen_result)
 
                 # Checkpoint
-                if gen > 0 and gen % self.checkpoint_interval == 0:
+                if gen % self.checkpoint_interval == 0:
                     self._save_checkpoint(gen)
 
         except Exception as e:
@@ -267,6 +273,12 @@ class EvolutionEngine:
             best_dict = best.to_dict() if best else None
             agent.update_from_results(fitnesses, best_dict)
             self.db.save_agent(agent.to_dict())
+
+        try:
+            self.db.save_generation(gen_stats)
+        except Exception as e:
+            # If gen already exists (e.g. from a partial run), just log it
+            logger.warning("Could not save generation %d stats (likely already exists): %s", gen, e)
 
         self._emit("generation_end", {
             "description": f"Gen {gen}: best={gen_stats['best_fitness']:.4f}, avg={gen_stats['avg_fitness']:.4f}",
@@ -499,6 +511,7 @@ class EvolutionEngine:
                 "current_generation": self.current_generation,
                 "mutation_rate": self.mutator.current_rate,
                 "memory_summary": self.memory.to_dict(),
+                "history": self.history,
             },
             "population_snapshot": [],
             "agent_states": {a.id: a.to_dict() for a in self.builders},
@@ -512,6 +525,7 @@ class EvolutionEngine:
         self.best_fitness = state.get("best_fitness", 0.0)
         self.best_accuracy = state.get("best_accuracy", 0.0)
         self.current_generation = state.get("current_generation", 0)
+        self.history = state.get("history", [])
         self.mutator.current_rate = state.get("mutation_rate", self.mutator.base_rate)
         logger.info(
             "Restored from checkpoint: gen=%d, best_fitness=%.4f",
